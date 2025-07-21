@@ -3,7 +3,7 @@ async function fetchSignals() {
   container.innerHTML = "🔄 Loading...";
 
   try {
-    const response = await fetch("https://a5-early-pump.onrender.com/api/early-pump");
+    const response = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=$");
     const data = await response.json();
 
     container.innerHTML = "";
