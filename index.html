@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Binance Top Gainers Scanner</title>
+    <title>Early Binance Gainers Scanner</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
         .container { max-width: 1200px; margin: 0 auto; }
@@ -31,12 +31,12 @@
 </head>
 <body>
     <div class="container">
-        <h1>Binance Top Gainers Scanner</h1>
+        <h1>Early Binance Gainers Scanner</h1>
         <div class="controls">
-            <button id="getSignalsBtn">Get Top Gainers Signals</button>
+            <button id="getSignalsBtn">Scan Early Signals</button>
             <button id="refreshBtn" disabled>Refresh</button>
         </div>
-        <div id="loading" class="loading" style="display: none;">Scanning Binance Top Gainers...</div>
+        <div id="loading" class="loading" style="display: none;">Scanning for Early Pump Signals...</div>
         <div id="error" class="error" style="display: none;"></div>
         <div id="signalContainer" class="signal-container"></div>
     </div>
@@ -52,8 +52,9 @@
             let isScanning = false;
             let signals = [];
             
-            // Minimum % Change to consider a coin as "Top Gainer"
-            const MIN_PERCENT_CHANGE = 5; // 5% (You can change to 10% or 20% if needed)
+            // Minimum criteria for early signal
+            const MIN_VOLUME_CHANGE = 150; // 150% volume surge
+            const MIN_PRICE_CHANGE = 3;     // 3% price increase (in recent candles)
             
             getSignalsBtn.addEventListener('click', async function() {
                 if (isScanning) return;
@@ -65,18 +66,20 @@
                 signalContainer.innerHTML = '';
                 
                 try {
-                    // Fetch 24hr ticker data to find top gainers
-                    const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
-                    const tickers = await response.json();
+                    // Step 1: Get all USDT pairs
+                    const exchangeInfo = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+                    const symbols = (await exchangeInfo.json()).symbols
+                        .filter(s => s.quoteAsset === 'USDT' && s.status === 'TRADING')
+                        .map(s => s.symbol);
                     
-                    // Filter USDT pairs with significant price increase
-                    const topGainers = tickers
-                        .filter(t => t.symbol.endsWith('USDT'))
-                        .filter(t => parseFloat(t.priceChangePercent) >= MIN_PERCENT_CHANGE)
-                        .sort((a, b) => parseFloat(b.priceChangePercent) - parseFloat(a.priceChangePercent));
+                    // Step 2: Filter out coins that are already top gainers (24h change >5%)
+                    const tickers = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+                    const topGainers = (await tickers.json())
+                        .filter(t => t.symbol.endsWith('USDT') && parseFloat(t.priceChangePercent) > 5)
+                        .map(t => t.symbol);
                     
-                    // Generate signals for these top gainers
-                    signals = await generateSignals(topGainers);
+                    // Step 3: Scan remaining coins for early signals
+                    signals = await findEarlySignals(symbols, topGainers);
                     displaySignals(signals);
                     
                     refreshBtn.disabled = false;
@@ -99,15 +102,17 @@
                 errorElement.style.display = 'none';
                 
                 try {
-                    // Re-fetch data
-                    const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
-                    const tickers = await response.json();
-                    const topGainers = tickers
-                        .filter(t => t.symbol.endsWith('USDT'))
-                        .filter(t => parseFloat(t.priceChangePercent) >= MIN_PERCENT_CHANGE)
-                        .sort((a, b) => parseFloat(b.priceChangePercent) - parseFloat(a.priceChangePercent));
+                    const exchangeInfo = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+                    const symbols = (await exchangeInfo.json()).symbols
+                        .filter(s => s.quoteAsset === 'USDT' && s.status === 'TRADING')
+                        .map(s => s.symbol);
                     
-                    signals = await generateSignals(topGainers);
+                    const tickers = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+                    const topGainers = (await tickers.json())
+                        .filter(t => t.symbol.endsWith('USDT') && parseFloat(t.priceChangePercent) > 5)
+                        .map(t => t.symbol);
+                    
+                    signals = await findEarlySignals(symbols, topGainers);
                     displaySignals(signals);
                 } catch (err) {
                     errorElement.textContent = `Error: ${err.message}`;
@@ -119,50 +124,75 @@
                 }
             });
             
-            async function generateSignals(topGainers) {
+            async function findEarlySignals(symbols, topGainers) {
                 const signals = [];
+                const batchSize = 5; // To avoid rate limiting
                 
-                for (const ticker of topGainers) {
-                    const symbol = ticker.symbol;
-                    const priceChangePercent = parseFloat(ticker.priceChangePercent);
-                    const currentPrice = parseFloat(ticker.lastPrice);
+                for (let i = 0; i < symbols.length; i += batchSize) {
+                    const batch = symbols.slice(i, i + batchSize)
+                        .filter(s => !topGainers.includes(s)); // Skip already pumping coins
                     
-                    // Generate realistic target and stoploss based on momentum
-                    const entryPrice = currentPrice;
-                    const targetPercent = priceChangePercent < 10 ? 3 : priceChangePercent < 20 ? 5 : 8;
-                    const stoplossPercent = priceChangePercent < 10 ? 2 : priceChangePercent < 20 ? 3 : 4;
+                    const batchPromises = batch.map(symbol => checkEarlySignal(symbol));
+                    const batchResults = await Promise.all(batchPromises);
                     
-                    const targetPrice = entryPrice * (1 + (targetPercent / 100));
-                    const stoplossPrice = entryPrice * (1 - (stoplossPercent / 100));
+                    signals.push(...batchResults.filter(s => s !== null));
                     
-                    // Determine strength
-                    let strengthScore = 'Medium';
-                    if (priceChangePercent > 15 || parseFloat(ticker.quoteVolume) > 5000000) { // $5M+ volume or >15% change
-                        strengthScore = 'High';
-                    }
-                    
-                    signals.push({
-                        symbol,
-                        entryPrice,
-                        targetPrice,
-                        stoplossPrice,
-                        targetChangePercent: targetPercent,
-                        stoplossChangePercent: stoplossPercent,
-                        currentChangePercent: priceChangePercent,
-                        volumeSurge: Math.round(100 + Math.random() * 300), // Simulated volume surge
-                        strengthScore,
-                        timeDetected: new Date().toLocaleTimeString()
-                    });
+                    // Update loading message
+                    loadingElement.textContent = `Scanning for Early Signals... ${Math.min(i + batchSize, symbols.length)}/${symbols.length}`;
                 }
                 
-                return signals;
+                // Sort by strength
+                return signals.sort((a, b) => b.strengthScore.localeCompare(a.strengthScore));
+            }
+            
+            async function checkEarlySignal(symbol) {
+                try {
+                    // Get recent 15m candles (last 4 hours)
+                    const klines = await (await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=16`)).json();
+                    
+                    // Calculate volume and price changes
+                    const currentPrice = parseFloat(klines[klines.length - 1][4]); // Close price
+                    const prevPrice = parseFloat(klines[0][4]); // 4 hours ago price
+                    const priceChangePercent = ((currentPrice - prevPrice) / prevPrice) * 100;
+                    
+                    // Volume analysis
+                    const currentVolume = parseFloat(klines[klines.length - 1][5]); // Latest volume
+                    const avgVolume = klines.slice(0, -1).reduce((sum, k) => sum + parseFloat(k[5]), 0) / (klines.length - 1);
+                    const volumeChangePercent = ((currentVolume - avgVolume) / avgVolume) * 100;
+                    
+                    // Early signal conditions
+                    if (priceChangePercent >= MIN_PRICE_CHANGE && volumeChangePercent >= MIN_VOLUME_CHANGE) {
+                        const entryPrice = currentPrice;
+                        const targetPercent = priceChangePercent < 5 ? 3 : 5; // Dynamic target
+                        const stoplossPercent = 2; // Fixed 2% stoploss
+                        
+                        return {
+                            symbol,
+                            entryPrice,
+                            targetPrice: entryPrice * (1 + (targetPercent / 100)),
+                            stoplossPrice: entryPrice * (1 - (stoplossPercent / 100)),
+                            targetChangePercent: targetPercent,
+                            stoplossChangePercent: stoplossPercent,
+                            currentChangePercent: priceChangePercent,
+                            volumeSurge: Math.round(volumeChangePercent),
+                            strengthScore: volumeChangePercent > 300 ? 'High' : 'Medium',
+                            timeDetected: new Date().toLocaleTimeString(),
+                            isEarly: true
+                        };
+                    }
+                    
+                    return null;
+                } catch (err) {
+                    console.error(`Error checking ${symbol}:`, err);
+                    return null;
+                }
             }
             
             function displaySignals(signals) {
                 signalContainer.innerHTML = '';
                 
                 if (signals.length === 0) {
-                    signalContainer.innerHTML = '<div class="error">No Top Gainers found with >' + MIN_PERCENT_CHANGE + '% change.</div>';
+                    signalContainer.innerHTML = '<div class="error">No early signals found. Try again later.</div>';
                     return;
                 }
                 
@@ -177,8 +207,12 @@
                             <div class="time-detected">${signal.timeDetected}</div>
                         </div>
                         <div class="signal-detail">
-                            <div class="detail-label">24h Change:</div>
+                            <div class="detail-label">Current Change (4h):</div>
                             <div class="detail-value ${signal.currentChangePercent >= 0 ? 'positive' : 'negative'}">${signal.currentChangePercent.toFixed(2)}%</div>
+                        </div>
+                        <div class="signal-detail">
+                            <div class="detail-label">Volume Surge:</div>
+                            <div class="detail-value positive">+${signal.volumeSurge}%</div>
                         </div>
                         <div class="signal-detail">
                             <div class="detail-label">Entry Price:</div>
@@ -193,13 +227,10 @@
                             <div class="detail-value negative">${signal.stoplossPrice.toFixed(6)} (-${signal.stoplossChangePercent.toFixed(2)}%)</div>
                         </div>
                         <div class="signal-detail">
-                            <div class="detail-label">Volume Surge:</div>
-                            <div class="detail-value positive">+${signal.volumeSurge}%</div>
+                            <div class="detail-label">Strength:</div>
+                            <div class="detail-value strength-${signal.strengthScore.toLowerCase()}">${signal.strengthScore} Potential</div>
                         </div>
-                        <div class="signal-detail">
-                            <div class="detail-label">Strength Score:</div>
-                            <div class="detail-value strength-${signal.strengthScore.toLowerCase()}">${signal.strengthScore}</div>
-                        </div>
+                        ${signal.isEarly ? '<div style="color: #3498db; text-align: center; margin-top: 10px; font-weight: bold;">🚀 EARLY SIGNAL (Not in Top Gainers Yet)</div>' : ''}
                     `;
                     
                     signalContainer.appendChild(card);
